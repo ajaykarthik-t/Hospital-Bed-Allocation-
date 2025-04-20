@@ -22,7 +22,7 @@ def get_database_connection():
     try:
         # More robust connection string - explicit database name
         client = MongoClient(
-            "mongodb+srv://shreya:shreya@cluster0.2hywi.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0",
+            "mongodb+srv://srit:srit@cluster0.ew3gaei.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0",
             serverSelectionTimeoutMS=5000,  # 5 second timeout
             connectTimeoutMS=5000,
             socketTimeoutMS=10000
