@@ -12,6 +12,7 @@ import time
 import requests
 import os
 import json
+import re
 
 # Page configuration
 st.set_page_config(
@@ -117,20 +118,20 @@ def get_local_doctor_response(query):
     # If no match found, return a deterministic but seemingly random default response
     return default_responses[hash(query) % len(default_responses)]
 
-# MongoDB Connection - Updated with better error handling
-@st.cache_resource(ttl=300)  # Cache for 5 minutes only to ensure fresh data
+# MongoDB Connection - More reliable implementation
+@st.cache_resource
 def get_database_connection():
     try:
-        # More robust connection string - explicit database name
+        # More robust connection string with proper error handling
         client = MongoClient(
             "mongodb+srv://srit:srit@cluster0.ew3gaei.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0",
-            serverSelectionTimeoutMS=5000,  # 5 second timeout
-            connectTimeoutMS=5000,
-            socketTimeoutMS=10000
+            serverSelectionTimeoutMS=10000,  # Increased timeout
+            connectTimeoutMS=10000,
+            socketTimeoutMS=30000  # Increased for long operations
         )
         
         # Test connection by attempting to get server info
-        server_info = client.server_info()
+        client.server_info()
         
         # Connect to the database explicitly
         db = client.Cluster0
@@ -141,8 +142,9 @@ def get_database_connection():
         
         return db
     except Exception as e:
-        st.error(f"Failed to connect to MongoDB: {str(e)}")
         print(f"MongoDB connection error details: {str(e)}")
+        st.error(f"Failed to connect to MongoDB: {str(e)}")
+        # Return None on failure so the application can handle this gracefully
         return None
 
 # Get database connection
@@ -182,29 +184,108 @@ HOSPITALS = [
     }
 ]
 
-# Initialize collections if they don't exist
+# Initialize collections with better error handling and validation
 def initialize_collections():
-    # Check if collections exist and create them if they don't
-    if db is not None:
-        try:
-            # Create Users collection if it doesn't exist
-            if "users" not in db.list_collection_names():
-                users_collection = db["users"]
-                users_collection.insert_one({"username": "patient1", "password": hashlib.sha256("password123".encode()).hexdigest()})
-                st.sidebar.success("Users collection created!")
-            
-            # Create Hospitals collection if it doesn't exist
-            if "hospitals" not in db.list_collection_names():
-                hospitals_collection = db["hospitals"]
-                hospitals_collection.insert_many(HOSPITALS)
-                st.sidebar.success("Hospitals collection created!")
-            
-            # Create Bookings collection if it doesn't exist
-            if "bookings" not in db.list_collection_names():
+    """
+    Initialize database collections if they don't exist
+    with proper error handling and transaction support
+    """
+    if db is None:
+        st.sidebar.error("Database connection not available. Cannot initialize collections.")
+        return False
+    
+    try:
+        # Get list of existing collections
+        existing_collections = db.list_collection_names()
+        client = db.client
+        
+        # Create Users collection if it doesn't exist
+        if "users" not in existing_collections:
+            try:
+                with client.start_session() as session:
+                    users_collection = db["users"]
+                    # Create default user
+                    default_user = {
+                        "username": "patient1", 
+                        "password": hashlib.sha256("password123".encode()).hexdigest(),
+                        "full_name": "Test Patient",
+                        "phone": "1234567890",
+                        "created_at": datetime.now()
+                    }
+                    users_collection.insert_one(default_user, session=session)
+                    
+                    # Create index on username for faster lookups
+                    users_collection.create_index("username", unique=True)
+                    
+                    print("Users collection created successfully")
+            except Exception as e:
+                print(f"Error creating users collection: {str(e)}")
+                return False
+        
+        # Create Hospitals collection if it doesn't exist
+        if "hospitals" not in existing_collections:
+            try:
+                with client.start_session() as session:
+                    hospitals_collection = db["hospitals"]
+                    
+                    # Insert hospital data within transaction
+                    hospitals_collection.insert_many(HOSPITALS, session=session)
+                    
+                    # Create indexes for faster lookups
+                    hospitals_collection.create_index("hospital_name", unique=True)
+                    hospitals_collection.create_index("username", unique=True)
+                    
+                    print("Hospitals collection created successfully")
+            except Exception as e:
+                print(f"Error creating hospitals collection: {str(e)}")
+                return False
+        
+        # Create Bookings collection if it doesn't exist
+        if "bookings" not in existing_collections:
+            try:
                 bookings_collection = db["bookings"]
-                st.sidebar.success("Bookings collection created!")
-        except Exception as e:
-            st.sidebar.error(f"Error initializing collections: {e}")
+                
+                # Create indexes for faster lookups
+                bookings_collection.create_index([("patient_name", pymongo.ASCENDING), ("phone", pymongo.ASCENDING)])
+                bookings_collection.create_index("hospital", pymongo.ASCENDING)
+                bookings_collection.create_index("booking_date", pymongo.DESCENDING)
+                
+                print("Bookings collection created successfully")
+            except Exception as e:
+                print(f"Error creating bookings collection: {str(e)}")
+                return False
+        
+        # Verify hospitals data consistency
+        hospitals_collection = db["hospitals"]
+        for hospital in hospitals_collection.find():
+            # Ensure patients list exists
+            if "patients" not in hospital:
+                hospitals_collection.update_one(
+                    {"_id": hospital["_id"]},
+                    {"$set": {"patients": []}}
+                )
+                
+            # Ensure bed counts are valid
+            if "occupied_beds" not in hospital or "available_beds" not in hospital:
+                # Calculate occupied beds from patients list if it exists
+                occupied = len(hospital.get("patients", []))
+                total = hospital.get("total_beds", 100)
+                available = total - occupied
+                
+                hospitals_collection.update_one(
+                    {"_id": hospital["_id"]},
+                    {"$set": {
+                        "occupied_beds": occupied,
+                        "available_beds": available
+                    }}
+                )
+                
+        return True
+        
+    except Exception as e:
+        st.sidebar.error(f"Error initializing collections: {str(e)}")
+        print(f"Database initialization error: {str(e)}")
+        return False
 
 # Initialize collections
 initialize_collections()
@@ -240,37 +321,110 @@ if 'patient_info' not in st.session_state:
     st.session_state.patient_info = {}
 if 'nearest_hospital' not in st.session_state:
     st.session_state.nearest_hospital = None
+if 'show_registration' not in st.session_state:
+    st.session_state.show_registration = False
 # Chatbot session state
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "booking"
 
-# Authentication Functions
+# More robust authentication functions
 def authenticate_user(username, password):
-    if db is not None:
-        try:
-            users_collection = db["users"]
-            hashed_password = hashlib.sha256(password.encode()).hexdigest()
-            user = users_collection.find_one({"username": username, "password": hashed_password})
-            if user:
-                return True
-        except Exception as e:
-            st.error(f"Authentication error: {e}")
-    return False
+    """Authenticate a patient user with better error handling"""
+    if not username or not password:
+        return False
+        
+    if db is None:
+        st.error("Unable to connect to database. Please try again later.")
+        return False
+        
+    try:
+        users_collection = db["users"]
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        # Try to find the user with both username and password
+        user = users_collection.find_one({"username": username, "password": hashed_password})
+        
+        return bool(user)  # Returns True if user exists, False otherwise
+    except Exception as e:
+        print(f"Authentication error: {str(e)}")
+        st.error(f"Authentication error occurred. Please try again.")
+        return False
 
 def authenticate_hospital(username, password):
-    if db is not None:
-        try:
-            hospitals_collection = db["hospitals"]
-            hashed_password = hashlib.sha256(password.encode()).hexdigest()
-            hospital = hospitals_collection.find_one({"username": username, "password": hashed_password})
-            if hospital:
-                st.session_state.hospital_name = hospital["hospital_name"]
-                return True
-        except Exception as e:
-            st.error(f"Hospital authentication error: {e}")
-    return False
+    """Authenticate a hospital admin with better error handling"""
+    if not username or not password:
+        return False
+        
+    if db is None:
+        st.error("Unable to connect to database. Please try again later.")
+        return False
+        
+    try:
+        hospitals_collection = db["hospitals"]
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        # Try to find the hospital with both username and password
+        hospital = hospitals_collection.find_one({"username": username, "password": hashed_password})
+        
+        if hospital:
+            st.session_state.hospital_name = hospital["hospital_name"]
+            return True
+        return False
+    except Exception as e:
+        print(f"Hospital authentication error: {str(e)}")
+        st.error(f"Authentication error occurred. Please try again.")
+        return False
+
+# Function to create a new patient user account
+def register_user(username, password, confirm_password, full_name, phone):
+    """Register a new patient user with validation"""
+    if db is None:
+        st.error("Unable to connect to database. Please try again later.")
+        return False, "Database connection error"
+        
+    # Validate inputs
+    if not username or not password or not confirm_password or not full_name or not phone:
+        return False, "All fields are required"
+        
+    if password != confirm_password:
+        return False, "Passwords do not match"
+        
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters long"
+        
+    try:
+        users_collection = db["users"]
+        
+        # Check if username already exists
+        existing_user = users_collection.find_one({"username": username})
+        if existing_user:
+            return False, "Username already exists"
+            
+        # Hash the password
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        
+        # Create new user document
+        new_user = {
+            "username": username,
+            "password": hashed_password,
+            "full_name": full_name,
+            "phone": phone,
+            "created_at": datetime.now()
+        }
+        
+        # Insert the new user
+        result = users_collection.insert_one(new_user)
+        
+        if result.inserted_id:
+            return True, "User registered successfully"
+        else:
+            return False, "Failed to create user"
+            
+    except Exception as e:
+        print(f"Registration error: {str(e)}")
+        return False, f"Registration error occurred: {str(e)}"
 
 # Logout Function
 def logout():
@@ -290,6 +444,7 @@ def logout():
     st.session_state.patient_info = {}
     st.session_state.nearest_hospital = None
     st.session_state.chat_history = []
+    st.session_state.show_registration = False
 
 # Hospital Selection Logic
 def find_nearest_hospital(patient_location, max_distance):
@@ -319,124 +474,238 @@ def find_nearest_hospital(patient_location, max_distance):
         return None
     except Exception as e:
         st.error(f"Error finding nearest hospital: {e}")
+        print(f"Error finding nearest hospital: {str(e)}")
         return None
 
-# FIXED: Completely rewritten book_hospital_bed function
 def book_hospital_bed(patient_name, phone, symptoms, hospital_name):
+    """
+    Book a hospital bed with proper transaction handling and error recovery
+    """
     if db is None:
-        st.session_state.booking_error = "Database connection not available"
-        print("Database connection not available")
+        error_msg = "Database connection not available"
+        st.session_state.booking_error = error_msg
+        print(error_msg)
         return False
     
     try:
         print(f"Starting booking process for {patient_name} at {hospital_name}")
         
-        # Get hospitals collection
+        # Get collections
         hospitals_collection = db["hospitals"]
         bookings_collection = db["bookings"]
         
-        # First, check if the hospital exists and has beds
-        hospital = hospitals_collection.find_one({"hospital_name": hospital_name})
+        # Use a session for better transaction control
+        client = hospitals_collection.database.client
         
-        if not hospital:
-            st.session_state.booking_error = f"Hospital {hospital_name} not found"
-            print(f"Hospital {hospital_name} not found")
-            return False
+        with client.start_session() as session:
+            # First, check if the hospital exists and has beds - with a direct find to ensure latest data
+            hospital = hospitals_collection.find_one(
+                {"hospital_name": hospital_name},
+                session=session
+            )
             
-        if hospital["available_beds"] <= 0:
-            st.session_state.booking_error = f"No beds available in {hospital_name}"
-            print(f"No beds available in {hospital_name}")
-            return False
-        
-        # Check if patient is already admitted to this hospital
-        patient_already_admitted = False
-        if "patients" in hospital and hospital["patients"]:
-            for patient in hospital["patients"]:
-                if patient.get("name") == patient_name and patient.get("phone") == phone:
-                    patient_already_admitted = True
-                    break
-                    
-        if patient_already_admitted:
-            st.session_state.booking_error = f"Patient {patient_name} already admitted to {hospital_name}"
-            print(f"Patient {patient_name} already admitted to {hospital_name}")
-            return False
-        
-        # Format the patient data
-        patient_data = {
-            "name": patient_name,
-            "phone": phone,
-            "symptoms": symptoms,
-            "admission_date": datetime.now()
-        }
-        
-        print(f"Patient data prepared: {patient_data}")
-        
-        # Create booking record first
-        booking_data = {
-            "patient_name": patient_name,
-            "phone": phone,
-            "symptoms": symptoms,
-            "hospital": hospital_name,
-            "status": "Booked",
-            "booking_date": datetime.now()
-        }
-        
-        print(f"Booking data prepared: {booking_data}")
-        
-        # Insert booking and save ID
-        booking_result = bookings_collection.insert_one(booking_data)
-        booking_id = booking_result.inserted_id
-        
-        if not booking_id:
-            st.session_state.booking_error = "Failed to create booking record"
-            print("Failed to create booking record")
-            return False
+            if not hospital:
+                error_msg = f"Hospital {hospital_name} not found"
+                st.session_state.booking_error = error_msg
+                print(error_msg)
+                return False
+                
+            if hospital.get("available_beds", 0) <= 0:
+                error_msg = f"No beds available in {hospital_name}"
+                st.session_state.booking_error = error_msg
+                print(error_msg)
+                return False
             
-        print(f"Booking created with ID: {booking_id}")
-        
-        # Update hospital with atomic operation
-        result = hospitals_collection.update_one(
-            {"hospital_name": hospital_name, "available_beds": {"$gt": 0}},
-            {
-                "$inc": {"available_beds": -1, "occupied_beds": 1},
-                "$push": {"patients": patient_data}
+            # Check if patient is already admitted to this hospital
+            patient_already_admitted = False
+            if "patients" in hospital and hospital["patients"]:
+                for patient in hospital["patients"]:
+                    if patient.get("name") == patient_name and patient.get("phone") == phone:
+                        patient_already_admitted = True
+                        break
+                        
+            if patient_already_admitted:
+                error_msg = f"Patient {patient_name} already admitted to {hospital_name}"
+                st.session_state.booking_error = error_msg
+                print(error_msg)
+                return False
+            
+            # Format the patient data with proper datetime handling
+            patient_data = {
+                "name": patient_name,
+                "phone": phone,
+                "symptoms": symptoms,
+                "admission_date": datetime.now()
             }
-        )
-        
-        print(f"Hospital update result - matched: {result.matched_count}, modified: {result.modified_count}")
-        
-        # Check if update was successful
-        if result.matched_count == 0:
-            # Rollback - delete the booking we just created
-            bookings_collection.delete_one({"_id": booking_id})
-            st.session_state.booking_error = "No matching hospital with available beds found"
-            print("No matching hospital with available beds found - rollback performed")
-            return False
             
-        if result.modified_count == 0:
-            # Rollback - delete the booking we just created
-            bookings_collection.delete_one({"_id": booking_id})
-            st.session_state.booking_error = "Failed to update hospital data"
-            print("Failed to update hospital data - rollback performed")
-            return False
-        
-        print("Booking completed successfully")
-        
-        # Success - set session state for success message
-        st.session_state.booking_success = True
-        st.session_state.booking_details = {
-            "patient_name": patient_name,
-            "hospital": hospital_name,
-            "booking_id": str(booking_id),
-            "status": "Confirmed",
-            "booking_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        return True
+            print(f"Patient data prepared: {patient_data}")
             
+            # Create booking record first
+            booking_data = {
+                "patient_name": patient_name,
+                "phone": phone,
+                "symptoms": symptoms,
+                "hospital": hospital_name,
+                "status": "Booked",
+                "booking_date": datetime.now()
+            }
+            
+            print(f"Booking data prepared: {booking_data}")
+            
+            try:
+                # Start an explicit transaction
+                session.start_transaction()
+                
+                # Insert booking record
+                booking_result = bookings_collection.insert_one(booking_data, session=session)
+                booking_id = booking_result.inserted_id
+                
+                if not booking_id:
+                    session.abort_transaction()
+                    error_msg = "Failed to create booking record"
+                    st.session_state.booking_error = error_msg
+                    print(error_msg)
+                    return False
+                    
+                print(f"Booking created with ID: {booking_id}")
+                
+                # Update hospital with atomic operation - use find_one_and_update for atomicity
+                result = hospitals_collection.find_one_and_update(
+                    {"hospital_name": hospital_name, "available_beds": {"$gt": 0}},
+                    {
+                        "$inc": {"available_beds": -1, "occupied_beds": 1},
+                        "$push": {"patients": patient_data}
+                    },
+                    return_document=pymongo.ReturnDocument.AFTER,
+                    session=session
+                )
+                
+                if not result:
+                    # If update failed, abort the transaction
+                    session.abort_transaction()
+                    error_msg = "No matching hospital with available beds found"
+                    st.session_state.booking_error = error_msg
+                    print(f"{error_msg} - transaction aborted")
+                    return False
+                
+                # Commit the transaction
+                session.commit_transaction()
+                print("Transaction committed successfully")
+                
+                # Success - set session state for success message
+                st.session_state.booking_success = True
+                st.session_state.booking_details = {
+                    "patient_name": patient_name,
+                    "hospital": hospital_name,
+                    "booking_id": str(booking_id),
+                    "status": "Confirmed",
+                    "booking_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                return True
+                
+            except Exception as tx_error:
+                # If any error occurs during transaction, abort it
+                if session.in_transaction:
+                    session.abort_transaction()
+                raise tx_error  # Re-raise to be caught by outer try-except
+                    
     except Exception as e:
         error_msg = f"Error during booking: {str(e)}"
         print(f"Exception in booking: {error_msg}")
         st.session_state.booking_error = error_msg
+        return False
+
+def discharge_patient(hospital_name, patient_name, patient_phone):
+    """
+    Discharge a patient with proper error handling and atomic operations
+    """
+    if db is None:
+        error_msg = "Database connection not available"
+        st.session_state.discharge_error = error_msg
+        print(error_msg)
+        return False
+    
+    try:
+        print(f"Starting discharge process for {patient_name} from {hospital_name}")
+        
+        # Get hospitals collection
+        hospitals_collection = db["hospitals"]
+        client = hospitals_collection.database.client
+        
+        with client.start_session() as session:
+            try:
+                # Start transaction
+                session.start_transaction()
+                
+                # First verify the patient exists
+                hospital = hospitals_collection.find_one(
+                    {
+                        "hospital_name": hospital_name,
+                        "patients": {"$elemMatch": {"name": patient_name, "phone": patient_phone}}
+                    },
+                    session=session
+                )
+                
+                if not hospital:
+                    session.abort_transaction()
+                    error_msg = f"Patient {patient_name} not found in {hospital_name}"
+                    st.session_state.discharge_error = error_msg
+                    print(error_msg)
+                    return False
+                
+                # Update bookings collection to mark as discharged
+                bookings_collection = db["bookings"]
+                booking_update = bookings_collection.update_one(
+                    {
+                        "patient_name": patient_name,
+                        "phone": patient_phone,
+                        "hospital": hospital_name,
+                        "status": "Booked"
+                    },
+                    {
+                        "$set": {
+                            "status": "Discharged",
+                            "discharge_date": datetime.now()
+                        }
+                    },
+                    session=session
+                )
+                
+                # Remove patient and update bed counts atomically
+                result = hospitals_collection.find_one_and_update(
+                    {"hospital_name": hospital_name},
+                    {
+                        "$pull": {"patients": {"name": patient_name, "phone": patient_phone}},
+                        "$inc": {"available_beds": 1, "occupied_beds": -1}
+                    },
+                    return_document=pymongo.ReturnDocument.AFTER,
+                    session=session
+                )
+                
+                if not result:
+                    session.abort_transaction()
+                    error_msg = "Failed to update hospital data during discharge"
+                    st.session_state.discharge_error = error_msg
+                    print(error_msg)
+                    return False
+                
+                # Commit transaction
+                session.commit_transaction()
+                print(f"Successfully discharged {patient_name} from {hospital_name}")
+                
+                st.session_state.discharge_success = True
+                return True
+                
+            except Exception as tx_error:
+                # If any error occurs during transaction, abort it
+                if session.in_transaction:
+                    session.abort_transaction()
+                raise tx_error  # Re-raise to be caught by outer try-except
+                
+    except Exception as e:
+        error_msg = f"Error during patient discharge: {str(e)}"
+        print(f"Exception in discharge: {error_msg}")
+        st.session_state.discharge_error = error_msg
         return False
 
 # Chatbot Interface - Simplified version without suggested questions
@@ -525,6 +794,44 @@ def display_chatbot_interface():
         - Dinner: 6:00 PM
         - Quiet Hours: 10 PM - 6 AM
         """)
+
+# Patient Registration Interface
+def display_registration_interface():
+    st.subheader("Create a Patient Account")
+    
+    with st.form("registration_form"):
+        username = st.text_input("Username", placeholder="Choose a username")
+        full_name = st.text_input("Full Name", placeholder="Enter your full name")
+        phone = st.text_input("Phone Number", placeholder="Enter your phone number")
+        
+        password = st.text_input("Password", type="password", placeholder="Choose a password (min 6 characters)")
+        confirm_password = st.text_input("Confirm Password", type="password", placeholder="Confirm your password")
+        
+        submit_button = st.form_submit_button("Register")
+    
+    if submit_button:
+        # Validate inputs
+        if not username or not password or not confirm_password or not full_name or not phone:
+            st.error("All fields are required")
+            return
+        
+        if password != confirm_password:
+            st.error("Passwords do not match")
+            return
+        
+        if len(password) < 6:
+            st.error("Password must be at least 6 characters long")
+            return
+        
+        # Call registration function
+        success, message = register_user(username, password, confirm_password, full_name, phone)
+        
+        if success:
+            st.success(message)
+            st.info("You can now log in with your new account")
+            st.session_state.show_registration = False
+        else:
+            st.error(message)
 
 # Patient Booking Interface
 def display_booking_interface():
@@ -670,7 +977,7 @@ def display_booking_interface():
                 st.subheader("📍 Location Map")
                 folium_static(m)
         
-        # FIXED: Confirm booking button with progress indicator
+        # Confirm booking button with progress indicator
         if st.button("Book Now"):
             with st.spinner("Processing your booking..."):
                 patient_name = st.session_state.patient_info["name"]
@@ -706,7 +1013,7 @@ def display_patient_interface():
     with tab2:
         display_chatbot_interface()
 
-# Hospital Admin Interface
+# Hospital Admin Interface with improved error handling and CRUD operations
 def display_hospital_interface():
     st.header(f"🏥 {st.session_state.hospital_name} Dashboard")
     
@@ -765,18 +1072,33 @@ def display_hospital_interface():
             
         if update_beds:
             try:
-                # Calculate new occupied count
-                new_occupied = hospital_data["total_beds"] - new_available
-                
-                # Update in database
-                update_result = hospitals_collection.update_one(
-                    {"hospital_name": st.session_state.hospital_name},
-                    {"$set": {"available_beds": new_available, "occupied_beds": new_occupied}}
-                )
-                
-                if update_result.modified_count == 1:
-                    st.session_state.update_success = True
-                    st.rerun()
+                # Only proceed if there's an actual change
+                if new_available != hospital_data["available_beds"]:
+                    # Calculate new occupied count
+                    new_occupied = hospital_data["total_beds"] - new_available
+                    
+                    # Prevent setting available beds lower than physical possibility
+                    patient_count = len(hospital_data.get("patients", []))
+                    if new_occupied < patient_count:
+                        st.session_state.update_error = f"Cannot set occupied beds lower than current patient count ({patient_count})"
+                        st.rerun()
+                    
+                    # Update in database with atomic operation
+                    client = hospitals_collection.database.client
+                    with client.start_session() as session:
+                        update_result = hospitals_collection.find_one_and_update(
+                            {"hospital_name": st.session_state.hospital_name},
+                            {"$set": {"available_beds": new_available, "occupied_beds": new_occupied}},
+                            return_document=pymongo.ReturnDocument.AFTER,
+                            session=session
+                        )
+                        
+                        if update_result:
+                            st.session_state.update_success = True
+                            st.rerun()
+                        else:
+                            st.session_state.update_error = "Failed to update bed count"
+                            st.rerun()
                 else:
                     st.session_state.update_error = "No changes were made to bed count"
                     st.rerun()
@@ -826,55 +1148,63 @@ def display_hospital_interface():
                 
                 st.dataframe(patients_df[display_cols], use_container_width=True)
                 
-                # Add discharge patient functionality
+                # Add discharge patient functionality with improved error handling
                 st.subheader("Discharge Patient")
-                patient_names = ["Select a patient"] + list(patients_df["name"] if "name" in patients_df.columns else [])
                 
-                if len(patient_names) > 1:  # If we have patients
-                    selected_patient = st.selectbox("Select Patient to Discharge", patient_names)
+                # Create a more robust patient selection system
+                if "name" in patients_df.columns and "phone" in patients_df.columns:
+                    patient_options = [f"{row['name']} ({row['phone']})" for _, row in patients_df.iterrows()]
+                    patient_options = ["Select a patient"] + patient_options
                     
-                    if selected_patient != "Select a patient":
-                        if st.button("Discharge Patient"):
-                            try:
-                                # Find the patient's phone
-                                patient_info = patients_df[patients_df["name"] == selected_patient].iloc[0]
-                                patient_phone = patient_info["phone"] if "phone" in patient_info else ""
+                    if len(patient_options) > 1:  # If we have patients
+                        selected_patient_option = st.selectbox("Select Patient to Discharge", patient_options)
+                        
+                        if selected_patient_option != "Select a patient":
+                            # Extract name and phone from the selection
+                            match = re.match(r"(.*) \((.*)\)$", selected_patient_option)
+                            if match:
+                                selected_name = match.group(1)
+                                selected_phone = match.group(2)
                                 
-                                # Remove patient from hospital
-                                result = hospitals_collection.update_one(
-                                    {"hospital_name": st.session_state.hospital_name},
-                                    {
-                                        "$pull": {"patients": {"name": selected_patient, "phone": patient_phone}},
-                                        "$inc": {"available_beds": 1, "occupied_beds": -1}
-                                    }
-                                )
+                                with st.form("discharge_form"):
+                                    st.write(f"Are you sure you want to discharge {selected_name}?")
+                                    confirm_discharge = st.form_submit_button("Confirm Discharge")
                                 
-                                if result.modified_count == 1:
-                                    st.session_state.discharge_success = True
-                                    st.rerun()
-                                else:
-                                    st.session_state.discharge_error = "Failed to discharge patient"
-                                    st.rerun()
-                            except Exception as e:
-                                st.session_state.discharge_error = f"Error discharging patient: {str(e)}"
-                                st.rerun()
+                                if confirm_discharge:
+                                    # Call the improved discharge function
+                                    discharge_result = discharge_patient(
+                                        hospital_name=st.session_state.hospital_name,
+                                        patient_name=selected_name,
+                                        patient_phone=selected_phone
+                                    )
+                                    
+                                    if discharge_result:
+                                        st.rerun()  # Refresh to show updated data
+                else:
+                    st.error("Patient data is missing required fields (name and phone)")
             else:
                 st.info("No patients currently admitted.")
         else:
             st.info("No patients currently admitted.")
             
     except Exception as e:
-        st.error(f"Error displaying hospital interface: {e}")
+        st.error(f"Error displaying hospital interface: {str(e)}")
+        print(f"Hospital interface error: {str(e)}")  # Log for debugging
 
-# Main App UI
+# Main App UI with improved logic
 def main():
     st.title("🏥 Smart Hospital Bed Allocation System")
     
     # Show MongoDB connection status
     if db is None:
         st.error("⚠️ Database connection failed. Some features may not work correctly.")
+    else:
+        # Initialize collections quietly - only show errors
+        init_result = initialize_collections()
+        if not init_result:
+            st.warning("⚠️ There was an issue initializing the database. Some features may be limited.")
     
-    # Sidebar for login/logout
+    # Sidebar for login/logout and registration
     with st.sidebar:
         st.header("User Controls")
         
@@ -887,28 +1217,46 @@ def main():
                 logout()
                 st.rerun()
         else:
-            login_type = st.radio("Select Login Type:", ["Patient", "Hospital Admin"])
-            
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            
-            if st.button("Login"):
-                if login_type == "Patient":
-                    if authenticate_user(username, password):
-                        st.session_state.logged_in = True
-                        st.session_state.user_type = "patient"
-                        st.session_state.username = username
+            if st.session_state.show_registration:
+                # Show the registration interface
+                display_registration_interface()
+                
+                # Add a button to go back to login
+                if st.button("Back to Login"):
+                    st.session_state.show_registration = False
+                    st.rerun()
+            else:
+                # Show the login interface
+                login_type = st.radio("Select Login Type:", ["Patient", "Hospital Admin"])
+                
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("Login"):
+                        if login_type == "Patient":
+                            if authenticate_user(username, password):
+                                st.session_state.logged_in = True
+                                st.session_state.user_type = "patient"
+                                st.session_state.username = username
+                                st.rerun()
+                            else:
+                                st.error("Invalid credentials!")
+                        else:  # Hospital Admin
+                            if authenticate_hospital(username, password):
+                                st.session_state.logged_in = True
+                                st.session_state.user_type = "hospital"
+                                st.session_state.username = username
+                                st.rerun()
+                            else:
+                                st.error("Invalid credentials!")
+                
+                with col2:
+                    if st.button("Register") and login_type == "Patient":
+                        st.session_state.show_registration = True
                         st.rerun()
-                    else:
-                        st.error("Invalid credentials!")
-                else:  # Hospital Admin
-                    if authenticate_hospital(username, password):
-                        st.session_state.logged_in = True
-                        st.session_state.user_type = "hospital"
-                        st.session_state.username = username
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials!")
     
     # Main Content Area
     if not st.session_state.logged_in:
