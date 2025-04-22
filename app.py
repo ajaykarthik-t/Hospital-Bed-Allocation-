@@ -8,6 +8,10 @@ import hashlib
 import folium
 from streamlit_folium import folium_static
 from bson import ObjectId
+import time
+import requests
+import os
+import json
 
 # Page configuration
 st.set_page_config(
@@ -16,13 +20,110 @@ st.set_page_config(
     layout="wide"
 )
 
+# ====================== GEMINI API INTEGRATION ======================
+# Get API key from environment variable, fall back to the original key if not set
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCYDTn-QZC5ZlvX9DGO10fWvk2jz-qyfhI")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+def call_gemini_api(prompt):
+    """Call the Gemini API with the given prompt and handle errors"""
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+    
+    # Add API key as query parameter
+    url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}"
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            response_json = response.json()
+            # Extract the generated text from the response
+            if "candidates" in response_json and len(response_json["candidates"]) > 0:
+                if "content" in response_json["candidates"][0]:
+                    content = response_json["candidates"][0]["content"]
+                    if "parts" in content and len(content["parts"]) > 0:
+                        if "text" in content["parts"][0]:
+                            return content["parts"][0]["text"]
+            
+            # If we couldn't extract the text properly
+            return "I'm sorry, I couldn't process your question. Please try again."
+        else:
+            # If API call failed, fall back to local responses
+            return get_local_doctor_response(prompt)
+            
+    except Exception as e:
+        # If any error occurs, fall back to local responses
+        print(f"API call error: {str(e)}")
+        return get_local_doctor_response(prompt)
+
+# Local doctor response implementation as fallback
+def get_local_doctor_response(query):
+    """Generate a doctor-like response locally instead of using external API."""
+    # Dictionary of common symptoms and responses
+    responses = {
+        "pain": "Pain can be concerning. Can you describe where the pain is located and how severe it is on a scale of 1-10? Is it constant or does it come and go? This information will help me understand your condition better.",
+        
+        "fever": "A fever is often a sign that your body is fighting an infection. It's important to stay hydrated and rest. If your temperature exceeds 103°F (39.4°C) or persists for more than 3 days, please come in for an examination.",
+        
+        "headache": "Headaches can have many causes including stress, dehydration, or tension. Try to rest in a quiet, dark room and stay hydrated. If the headache is severe, sudden, or accompanied by other symptoms like confusion or stiff neck, please seek immediate medical attention.",
+        
+        "cough": "For a cough, I recommend staying hydrated and using honey with warm water (if you're not diabetic and over 1 year old). If you're experiencing shortness of breath, chest pain, or the cough has lasted more than 2 weeks, please schedule an in-person appointment.",
+        
+        "tired": "Fatigue can be caused by many factors including poor sleep, stress, or underlying medical conditions. Try to maintain a regular sleep schedule and healthy diet. If fatigue persists despite adequate rest, we should investigate further.",
+        
+        "dizzy": "Dizziness could be related to dehydration, inner ear issues, or blood pressure fluctuations. Sit or lie down immediately when feeling dizzy to prevent falling. Let's schedule you for a check-up to identify the cause.",
+        
+        "nausea": "For nausea, try eating small, bland meals and staying hydrated with clear fluids. Ginger tea can be helpful for some patients. If vomiting persists more than 24 hours or you see blood, please seek immediate care.",
+        
+        "medication": "It's very important to take all prescribed medications as directed. If you're experiencing side effects, don't stop taking the medication without consulting with me first - we may need to adjust your dosage or try an alternative.",
+        
+        "sleep": "Quality sleep is essential for recovery. Try to maintain a regular sleep schedule, avoid screens before bedtime, and keep your room cool and dark. If you're having persistent sleep difficulties, we can discuss sleep hygiene techniques or other interventions.",
+    }
+    
+    # Default responses for when no keywords match
+    default_responses = [
+        "Thank you for sharing that information. Could you provide more details about your symptoms, including when they started and if anything makes them better or worse?",
+        
+        "I understand your concern. Based on what you've told me, I recommend monitoring your symptoms for the next 24-48 hours. If they worsen or new symptoms develop, please contact us right away.",
+        
+        "Your health is important to us. From what you've described, it would be beneficial to schedule an in-person examination to properly assess your condition.",
+        
+        "I appreciate you reaching out. It's always better to address health concerns promptly. Could you tell me if you have any allergies or current medications?",
+        
+        "Thank you for your question. While I can provide general guidance, a thorough clinical assessment would give us more accurate information about your condition."
+    ]
+    
+    # Check if any keywords are in the query
+    query_lower = query.lower()
+    for keyword, response in responses.items():
+        if keyword in query_lower:
+            return response
+    
+    # If no match found, return a deterministic but seemingly random default response
+    return default_responses[hash(query) % len(default_responses)]
+
 # MongoDB Connection - Updated with better error handling
 @st.cache_resource(ttl=300)  # Cache for 5 minutes only to ensure fresh data
 def get_database_connection():
     try:
         # More robust connection string - explicit database name
         client = MongoClient(
-            "mongodb+srv://ajaykarthik:1234@cluster0.wqelv.mongodb.net/Cluster0?retryWrites=true&w=majority",
+            "mongodb+srv://srit:srit@cluster0.ew3gaei.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0",
             serverSelectionTimeoutMS=5000,  # 5 second timeout
             connectTimeoutMS=5000,
             socketTimeoutMS=10000
@@ -135,6 +236,15 @@ if 'discharge_success' not in st.session_state:
     st.session_state.discharge_success = False
 if 'discharge_error' not in st.session_state:
     st.session_state.discharge_error = None
+if 'patient_info' not in st.session_state:
+    st.session_state.patient_info = {}
+if 'nearest_hospital' not in st.session_state:
+    st.session_state.nearest_hospital = None
+# Chatbot session state
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = "booking"
 
 # Authentication Functions
 def authenticate_user(username, password):
@@ -177,6 +287,9 @@ def logout():
     st.session_state.update_error = None
     st.session_state.discharge_success = False
     st.session_state.discharge_error = None
+    st.session_state.patient_info = {}
+    st.session_state.nearest_hospital = None
+    st.session_state.chat_history = []
 
 # Hospital Selection Logic
 def find_nearest_hospital(patient_location, max_distance):
@@ -208,174 +321,213 @@ def find_nearest_hospital(patient_location, max_distance):
         st.error(f"Error finding nearest hospital: {e}")
         return None
 
-# Fixed booking function
+# FIXED: Completely rewritten book_hospital_bed function
 def book_hospital_bed(patient_name, phone, symptoms, hospital_name):
     if db is None:
         st.session_state.booking_error = "Database connection not available"
+        print("Database connection not available")
         return False
     
     try:
-        # Update hospital bed count
+        print(f"Starting booking process for {patient_name} at {hospital_name}")
+        
+        # Get hospitals collection
         hospitals_collection = db["hospitals"]
+        bookings_collection = db["bookings"]
+        
+        # First, check if the hospital exists and has beds
         hospital = hospitals_collection.find_one({"hospital_name": hospital_name})
         
-        if hospital and hospital["available_beds"] > 0:
-            # Format the patient data properly
-            patient_data = {
-                "name": patient_name,
-                "phone": phone,
-                "symptoms": symptoms,
-                "admission_date": datetime.now()
-            }
-            
-            # Log what we're trying to do (for debugging)
-            print(f"Attempting to update hospital: {hospital_name}")
-            print(f"Patient data: {patient_data}")
-            
-            # First verify that patient isn't already admitted
-            existing_patient = hospitals_collection.find_one({
-                "hospital_name": hospital_name,
-                "patients.name": patient_name,
-                "patients.phone": phone
-            })
-            
-            if existing_patient:
-                st.session_state.booking_error = f"Patient {patient_name} already admitted to {hospital_name}"
-                return False
-            
-            # Create booking record first
-            bookings_collection = db["bookings"]
-            booking_data = {
-                "patient_name": patient_name,
-                "phone": phone,
-                "symptoms": symptoms,
-                "hospital": hospital_name,
-                "status": "Booked",
-                "booking_date": datetime.now()
-            }
-            booking_result = bookings_collection.insert_one(booking_data)
-            booking_id = booking_result.inserted_id
-            
-            if not booking_id:
-                st.session_state.booking_error = "Failed to create booking record"
-                return False
-                
-            # Now update the hospital with the patient data
-            result = hospitals_collection.update_one(
-                {"hospital_name": hospital_name},
-                {
-                    "$inc": {"available_beds": -1, "occupied_beds": 1},
-                    "$push": {"patients": patient_data}
-                }
-            )
-            
-            # Check if the update was successful
-            if result.modified_count == 1:
-                print("Hospital update successful")
-                st.session_state.booking_success = True
-                st.session_state.booking_details = {
-                    "patient_name": patient_name,
-                    "hospital": hospital_name,
-                    "booking_id": str(booking_id),
-                    "status": "Confirmed",
-                    "booking_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                return True
-            else:
-                # If hospital update failed, rollback booking
-                bookings_collection.delete_one({"_id": booking_id})
-                error_msg = f"Failed to update hospital bed count: {result.modified_count} documents modified"
-                print(error_msg)
-                st.session_state.booking_error = error_msg
-                return False
-        else:
-            error_msg = f"No beds available in {hospital_name}"
-            print(error_msg)
-            st.session_state.booking_error = error_msg
+        if not hospital:
+            st.session_state.booking_error = f"Hospital {hospital_name} not found"
+            print(f"Hospital {hospital_name} not found")
             return False
+            
+        if hospital["available_beds"] <= 0:
+            st.session_state.booking_error = f"No beds available in {hospital_name}"
+            print(f"No beds available in {hospital_name}")
+            return False
+        
+        # Check if patient is already admitted to this hospital
+        patient_already_admitted = False
+        if "patients" in hospital and hospital["patients"]:
+            for patient in hospital["patients"]:
+                if patient.get("name") == patient_name and patient.get("phone") == phone:
+                    patient_already_admitted = True
+                    break
+                    
+        if patient_already_admitted:
+            st.session_state.booking_error = f"Patient {patient_name} already admitted to {hospital_name}"
+            print(f"Patient {patient_name} already admitted to {hospital_name}")
+            return False
+        
+        # Format the patient data
+        patient_data = {
+            "name": patient_name,
+            "phone": phone,
+            "symptoms": symptoms,
+            "admission_date": datetime.now()
+        }
+        
+        print(f"Patient data prepared: {patient_data}")
+        
+        # Create booking record first
+        booking_data = {
+            "patient_name": patient_name,
+            "phone": phone,
+            "symptoms": symptoms,
+            "hospital": hospital_name,
+            "status": "Booked",
+            "booking_date": datetime.now()
+        }
+        
+        print(f"Booking data prepared: {booking_data}")
+        
+        # Insert booking and save ID
+        booking_result = bookings_collection.insert_one(booking_data)
+        booking_id = booking_result.inserted_id
+        
+        if not booking_id:
+            st.session_state.booking_error = "Failed to create booking record"
+            print("Failed to create booking record")
+            return False
+            
+        print(f"Booking created with ID: {booking_id}")
+        
+        # Update hospital with atomic operation
+        result = hospitals_collection.update_one(
+            {"hospital_name": hospital_name, "available_beds": {"$gt": 0}},
+            {
+                "$inc": {"available_beds": -1, "occupied_beds": 1},
+                "$push": {"patients": patient_data}
+            }
+        )
+        
+        print(f"Hospital update result - matched: {result.matched_count}, modified: {result.modified_count}")
+        
+        # Check if update was successful
+        if result.matched_count == 0:
+            # Rollback - delete the booking we just created
+            bookings_collection.delete_one({"_id": booking_id})
+            st.session_state.booking_error = "No matching hospital with available beds found"
+            print("No matching hospital with available beds found - rollback performed")
+            return False
+            
+        if result.modified_count == 0:
+            # Rollback - delete the booking we just created
+            bookings_collection.delete_one({"_id": booking_id})
+            st.session_state.booking_error = "Failed to update hospital data"
+            print("Failed to update hospital data - rollback performed")
+            return False
+        
+        print("Booking completed successfully")
+        
+        # Success - set session state for success message
+        st.session_state.booking_success = True
+        st.session_state.booking_details = {
+            "patient_name": patient_name,
+            "hospital": hospital_name,
+            "booking_id": str(booking_id),
+            "status": "Confirmed",
+            "booking_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        return True
             
     except Exception as e:
         error_msg = f"Error during booking: {str(e)}"
-        print(error_msg)
+        print(f"Exception in booking: {error_msg}")
         st.session_state.booking_error = error_msg
         return False
 
-# Main App UI
-def main():
-    st.title("🏥 Smart Hospital Bed Allocation System")
-    
-    # Show MongoDB connection status
-    if db is None:
-        st.error("⚠️ Database connection failed. Some features may not work correctly.")
-    
-    # Sidebar for login/logout
-    with st.sidebar:
-        st.header("User Controls")
-        
-        if st.session_state.logged_in:
-            st.success(f"Logged in as: {st.session_state.username} ({st.session_state.user_type})")
-            if st.session_state.user_type == "hospital":
-                st.info(f"Hospital: {st.session_state.hospital_name}")
-            
-            if st.button("Logout"):
-                logout()
-                st.rerun()
-        else:
-            login_type = st.radio("Select Login Type:", ["Patient", "Hospital Admin"])
-            
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            
-            if st.button("Login"):
-                if login_type == "Patient":
-                    if authenticate_user(username, password):
-                        st.session_state.logged_in = True
-                        st.session_state.user_type = "patient"
-                        st.session_state.username = username
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials!")
-                else:  # Hospital Admin
-                    if authenticate_hospital(username, password):
-                        st.session_state.logged_in = True
-                        st.session_state.user_type = "hospital"
-                        st.session_state.username = username
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials!")
-    
-    # Main Content Area
-    if not st.session_state.logged_in:
-        # Landing page when not logged in
-        st.info("Please login to access the system.")
-        
-        # Display system features
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Patient Features")
-            st.markdown("""
-            - Book hospital bed based on your location
-            - Automatically find nearest hospital
-            - Secure booking confirmation
-            """)
-        
-        with col2:
-            st.subheader("Hospital Admin Features")
-            st.markdown("""
-            - Manage bed availability
-            - View admitted patients
-            - Track hospital occupancy
-            """)
-    
-    else:
-        # User is logged in - show appropriate interface
-        if st.session_state.user_type == "patient":
-            display_patient_interface()
-        else:  # hospital admin
-            display_hospital_interface()
+# Chatbot Interface - Simplified version without suggested questions
+def display_chatbot_interface():
+    st.header("🏥 Ask a Healthcare Provider")
+    st.write("Type your healthcare question below.")
+    st.info("This AI assistant can provide general medical information. For urgent concerns, please contact your actual healthcare provider.")
 
-# Patient Interface
-def display_patient_interface():
+    # Display chat history with simple styling
+    st.subheader("Your Conversation")
+    chat_container = st.container(height=400, border=True)
+    with chat_container:
+        if not st.session_state.chat_history:
+            st.write("👋 Hello! Please type your healthcare question below.")
+        
+        for message in st.session_state.chat_history:
+            role_label = "You" if message["role"] == "user" else "Healthcare Provider"
+            
+            if message["role"] == "user":
+                st.markdown(f"<div style='background-color:#f0f2f6;padding:10px;border-radius:10px;margin-bottom:10px'><strong>{role_label}:</strong> {message['content']}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div style='background-color:#e1f5fe;padding:10px;border-radius:10px;margin-bottom:10px'><strong>{role_label}:</strong> {message['content']}</div>", unsafe_allow_html=True)
+    
+    # Get user input with direct prompt
+    user_input = st.chat_input("Type your healthcare question here...")
+    
+    if user_input:
+        # Add user message to chat history
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        
+        # Show typing indicator
+        with st.spinner("Getting a response..."):
+            # Get AI response with healthcare provider prompt
+            prompt = f"""You are a helpful healthcare provider assistant responding to a patient's question.
+            Provide accurate, clear, and concise medical information.
+            Use simple language and be supportive in your response.
+            
+            Patient asks: {user_input}
+            
+            Your response:"""
+            
+            try:
+                # Try API call first
+                ai_response = call_gemini_api(prompt)
+                # If response is empty or error message, fall back to local
+                if not ai_response or "couldn't process" in ai_response:
+                    ai_response = get_local_doctor_response(user_input)
+            except:
+                # If any exception occurs, use local response
+                ai_response = get_local_doctor_response(user_input)
+                
+            time.sleep(0.5)  # Minimal thinking time
+        
+        # Add AI response to chat history
+        st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+        st.rerun()
+    
+    # Buttons for chat management with simple labels
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Start New Chat", help="Clear this conversation"):
+            st.session_state.chat_history = []
+            st.rerun()
+    
+    # Hospital information section - simplified
+    st.markdown("---")
+    
+    # Simple hospital information
+    st.subheader("Hospital Information")
+    
+    info_cols = st.columns(2)
+    
+    with info_cols[0]:
+        st.markdown("""
+        **Important Numbers:**
+        - Nurse Station: 123
+        - Hospital Info: 456
+        - Food Service: 789
+        """)
+    
+    with info_cols[1]:
+        st.markdown("""
+        **Daily Schedule:**
+        - Breakfast: 7:30 AM
+        - Lunch: 12:00 PM
+        - Dinner: 6:00 PM
+        - Quiet Hours: 10 PM - 6 AM
+        """)
+
+# Patient Booking Interface
+def display_booking_interface():
     st.header("📝 Book a Hospital Bed")
     
     # Show booking result if available
@@ -403,6 +555,8 @@ def display_patient_interface():
         if st.button("Make a New Booking"):
             st.session_state.booking_success = False
             st.session_state.booking_details = None
+            st.session_state.patient_info = {}
+            st.session_state.nearest_hospital = None
             st.rerun()
         
         # Return early to avoid showing the booking form
@@ -410,32 +564,45 @@ def display_patient_interface():
     
     if st.session_state.booking_error:
         st.error(f"⚠️ Booking failed: {st.session_state.booking_error}")
-        st.session_state.booking_error = None  # Reset after showing
+        # Don't reset the error here - we'll do it after displaying the form
     
     # Patient Details Form
     with st.form("patient_details_form"):
         st.subheader("Patient Details")
-        patient_name = st.text_input("Full Name", placeholder="Enter patient name")
-        phone = st.text_input("Phone Number", placeholder="Enter contact number")
-        symptoms = st.text_area("Symptoms", placeholder="Describe symptoms briefly")
+        
+        # Pre-fill form fields if we have data in session state
+        patient_name = st.text_input("Full Name", value=st.session_state.patient_info.get("name", ""), placeholder="Enter patient name")
+        phone = st.text_input("Phone Number", value=st.session_state.patient_info.get("phone", ""), placeholder="Enter contact number")
+        symptoms = st.text_area("Symptoms", value=st.session_state.patient_info.get("symptoms", ""), placeholder="Describe symptoms briefly")
         
         # Location capture
         st.subheader("📍 Patient Location")
         location_col1, location_col2 = st.columns(2)
         with location_col1:
-            latitude = st.number_input("Latitude", value=12.97, format="%.4f")
+            latitude = st.number_input("Latitude", value=st.session_state.patient_latitude or 12.97, format="%.4f")
         with location_col2:
-            longitude = st.number_input("Longitude", value=77.59, format="%.4f")
+            longitude = st.number_input("Longitude", value=st.session_state.patient_longitude or 77.59, format="%.4f")
         
         search_radius = st.slider("Maximum Search Distance (km)", min_value=5, max_value=30, value=10, step=5)
         
         find_hospital = st.form_submit_button("Find Nearest Hospital")
+    
+    # Reset error after displaying the form
+    if st.session_state.booking_error:
+        st.session_state.booking_error = None
     
     # Process form submission
     if find_hospital:
         if not all([patient_name, phone, symptoms]):
             st.error("Please fill in all patient details!")
         else:
+            # Save patient info to session state
+            st.session_state.patient_info = {
+                "name": patient_name,
+                "phone": phone, 
+                "symptoms": symptoms
+            }
+            
             st.session_state.patient_latitude = latitude
             st.session_state.patient_longitude = longitude
             
@@ -449,63 +616,95 @@ def display_patient_interface():
                 if nearest_hospital:
                     break
             
-            if nearest_hospital:
-                st.success(f"Nearest hospital found: {nearest_hospital['name']} (Distance: {nearest_hospital['distance']:.2f} km)")
+            # Save nearest hospital to session state
+            st.session_state.nearest_hospital = nearest_hospital
+            
+            # Force refresh to show the hospital data
+            st.rerun()
+    
+    # Display hospital information if we have it
+    if st.session_state.nearest_hospital:
+        nearest_hospital = st.session_state.nearest_hospital
+        st.success(f"Nearest hospital found: {nearest_hospital['name']} (Distance: {nearest_hospital['distance']:.2f} km)")
+        
+        # Display hospital details and booking option
+        st.subheader("Hospital Details")
+        st.markdown(f"""
+        - **Hospital:** {nearest_hospital['name']}
+        - **Distance:** {nearest_hospital['distance']:.2f} km
+        - **Available Beds:** {nearest_hospital['available_beds']}
+        """)
+        
+        # Show hospital on map
+        if db is not None:
+            hospital_info = db["hospitals"].find_one({"hospital_name": nearest_hospital['name']})
+            if hospital_info:
+                m = folium.Map(location=[st.session_state.patient_latitude, st.session_state.patient_longitude], zoom_start=12)
                 
-                # Display hospital details and booking option
-                st.subheader("Hospital Details")
-                st.markdown(f"""
-                - **Hospital:** {nearest_hospital['name']}
-                - **Distance:** {nearest_hospital['distance']:.2f} km
-                - **Available Beds:** {nearest_hospital['available_beds']}
-                """)
+                # Add patient marker
+                folium.Marker(
+                    [st.session_state.patient_latitude, st.session_state.patient_longitude],
+                    popup="Your Location",
+                    icon=folium.Icon(color="blue", icon="user")
+                ).add_to(m)
                 
-                # Show hospital on map
-                if db is not None:
-                    hospital_info = db["hospitals"].find_one({"hospital_name": nearest_hospital['name']})
-                    if hospital_info:
-                        m = folium.Map(location=[latitude, longitude], zoom_start=12)
-                        
-                        # Add patient marker
-                        folium.Marker(
-                            [latitude, longitude],
-                            popup="Your Location",
-                            icon=folium.Icon(color="blue", icon="user")
-                        ).add_to(m)
-                        
-                        # Add hospital marker
-                        hospital_lat = hospital_info["location"]["latitude"]
-                        hospital_lon = hospital_info["location"]["longitude"]
-                        folium.Marker(
-                            [hospital_lat, hospital_lon],
-                            popup=hospital_info["hospital_name"],
-                            icon=folium.Icon(color="red", icon="plus")
-                        ).add_to(m)
-                        
-                        # Add line between points
-                        folium.PolyLine(
-                            [(latitude, longitude), (hospital_lat, hospital_lon)],
-                            color="green",
-                            weight=2,
-                            opacity=1
-                        ).add_to(m)
-                        
-                        # Display map
-                        st.subheader("📍 Location Map")
-                        folium_static(m)
+                # Add hospital marker
+                hospital_lat = hospital_info["location"]["latitude"]
+                hospital_lon = hospital_info["location"]["longitude"]
+                folium.Marker(
+                    [hospital_lat, hospital_lon],
+                    popup=hospital_info["hospital_name"],
+                    icon=folium.Icon(color="red", icon="plus")
+                ).add_to(m)
                 
-                # Confirm booking button with progress indicator
-                if st.button("Book Now"):
-                    with st.spinner("Processing your booking..."):
-                        booking_success = book_hospital_bed(patient_name, phone, symptoms, nearest_hospital['name'])
-                        
-                        if booking_success:
-                            st.rerun()  # Refresh to show the success message
-                        else:
-                            # Error will be shown at the top when page reloads
-                            pass
-            else:
-                st.error(f"No hospital with available beds found within {search_radius} km radius!")
+                # Add line between points
+                folium.PolyLine(
+                    [(st.session_state.patient_latitude, st.session_state.patient_longitude), 
+                     (hospital_lat, hospital_lon)],
+                    color="green",
+                    weight=2,
+                    opacity=1
+                ).add_to(m)
+                
+                # Display map
+                st.subheader("📍 Location Map")
+                folium_static(m)
+        
+        # FIXED: Confirm booking button with progress indicator
+        if st.button("Book Now"):
+            with st.spinner("Processing your booking..."):
+                patient_name = st.session_state.patient_info["name"]
+                phone = st.session_state.patient_info["phone"]  
+                symptoms = st.session_state.patient_info["symptoms"]
+                
+                print(f"Book Now button clicked - patient: {patient_name}, hospital: {nearest_hospital['name']}")
+                
+                # Call the booking function
+                booking_success = book_hospital_bed(
+                    patient_name=patient_name,
+                    phone=phone,
+                    symptoms=symptoms,
+                    hospital_name=nearest_hospital['name']
+                )
+                
+                print(f"Booking result: {booking_success}")
+                
+                if booking_success:
+                    st.rerun()  # Refresh to show the success message
+                else:
+                    # Error will be shown at the top
+                    st.rerun()
+
+# Patient Interface with Tabs
+def display_patient_interface():
+    # Add tabs for different patient functions
+    tab1, tab2 = st.tabs(["📝 Book Hospital Bed", "🩺 Virtual Doctor"])
+    
+    with tab1:
+        display_booking_interface()
+    
+    with tab2:
+        display_chatbot_interface()
 
 # Hospital Admin Interface
 def display_hospital_interface():
@@ -666,6 +865,84 @@ def display_hospital_interface():
             
     except Exception as e:
         st.error(f"Error displaying hospital interface: {e}")
+
+# Main App UI
+def main():
+    st.title("🏥 Smart Hospital Bed Allocation System")
+    
+    # Show MongoDB connection status
+    if db is None:
+        st.error("⚠️ Database connection failed. Some features may not work correctly.")
+    
+    # Sidebar for login/logout
+    with st.sidebar:
+        st.header("User Controls")
+        
+        if st.session_state.logged_in:
+            st.success(f"Logged in as: {st.session_state.username} ({st.session_state.user_type})")
+            if st.session_state.user_type == "hospital":
+                st.info(f"Hospital: {st.session_state.hospital_name}")
+            
+            if st.button("Logout"):
+                logout()
+                st.rerun()
+        else:
+            login_type = st.radio("Select Login Type:", ["Patient", "Hospital Admin"])
+            
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            
+            if st.button("Login"):
+                if login_type == "Patient":
+                    if authenticate_user(username, password):
+                        st.session_state.logged_in = True
+                        st.session_state.user_type = "patient"
+                        st.session_state.username = username
+                        st.rerun()
+                    else:
+                        st.error("Invalid credentials!")
+                else:  # Hospital Admin
+                    if authenticate_hospital(username, password):
+                        st.session_state.logged_in = True
+                        st.session_state.user_type = "hospital"
+                        st.session_state.username = username
+                        st.rerun()
+                    else:
+                        st.error("Invalid credentials!")
+    
+    # Main Content Area
+    if not st.session_state.logged_in:
+        # Landing page when not logged in
+        st.info("Please login to access the system.")
+        
+        # Display system features
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Patient Features")
+            st.markdown("""
+            - Book hospital bed based on your location
+            - Automatically find nearest hospital
+            - Secure booking confirmation
+            - Virtual doctor consultation via chatbot
+            - Ward room availability check
+            """)
+        
+        with col2:
+            st.subheader("Hospital Admin Features")
+            st.markdown("""
+            - Manage bed availability
+            - View admitted patients
+            - Track hospital occupancy
+            - Process patient discharges
+            - View recent bookings
+            """)
+    
+    else:
+        # User is logged in - show appropriate interface
+        if st.session_state.user_type == "patient":
+            display_patient_interface()
+        else:  # hospital admin
+            display_hospital_interface()
 
 if __name__ == "__main__":
     main()
