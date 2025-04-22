@@ -446,35 +446,92 @@ def logout():
     st.session_state.chat_history = []
     st.session_state.show_registration = False
 
-# Hospital Selection Logic
+# Hospital Selection Logic - Fixed version
 def find_nearest_hospital(patient_location, max_distance):
+    """
+    Find the nearest hospital with available beds within the specified max_distance.
+    
+    Args:
+        patient_location: Tuple of (latitude, longitude)
+        max_distance: Maximum distance in kilometers to search
+        
+    Returns:
+        Dictionary with nearest hospital information or None if no hospital found
+    """
     if db is None:
         st.error("Database connection not available")
+        print("Database connection not available in find_nearest_hospital")
         return None
     
     try:
+        print(f"Searching for hospitals within {max_distance}km of {patient_location}")
+        
+        # Get the hospitals collection
         hospitals_collection = db["hospitals"]
-        hospitals = list(hospitals_collection.find({"available_beds": {"$gt": 0}}, 
-                                                {"hospital_name": 1, "location": 1, "available_beds": 1}))
         
+        # Explicitly query for hospitals with available beds > 0
+        query = {"available_beds": {"$gt": 0}}
+        projection = {"hospital_name": 1, "location": 1, "available_beds": 1, "total_beds": 1}
+        
+        # Execute the query
+        hospitals_cursor = hospitals_collection.find(query, projection)
+        
+        # Convert cursor to list to ensure we have data
+        hospitals = list(hospitals_cursor)
+        
+        print(f"Found {len(hospitals)} hospitals with available beds")
+        
+        if not hospitals:
+            print("No hospitals with available beds found in database")
+            return None
+            
+        # Calculate distances for each hospital
         hospital_distances = []
-        for hospital in hospitals:
-            hospital_location = (hospital["location"]["latitude"], hospital["location"]["longitude"])
-            distance = geodesic(patient_location, hospital_location).km
-            if distance <= max_distance:
-                hospital_distances.append({
-                    "name": hospital["hospital_name"],
-                    "distance": distance,
-                    "available_beds": hospital["available_beds"]
-                })
         
-        if hospital_distances:
-            # Sort by distance (primary) and available beds (secondary, in reverse)
-            return sorted(hospital_distances, key=lambda x: (x["distance"], -x["available_beds"]))[0]
-        return None
+        for hospital in hospitals:
+            # Ensure location data exists
+            if "location" not in hospital or "latitude" not in hospital["location"] or "longitude" not in hospital["location"]:
+                print(f"Hospital {hospital.get('hospital_name', 'Unknown')} has invalid location data")
+                continue
+                
+            hospital_location = (hospital["location"]["latitude"], hospital["location"]["longitude"])
+            
+            try:
+                # Calculate geodesic distance
+                distance = geodesic(patient_location, hospital_location).km
+                
+                print(f"Hospital: {hospital['hospital_name']}, Distance: {distance:.2f}km, Available beds: {hospital['available_beds']}")
+                
+                # Only include hospitals within the max_distance
+                if distance <= max_distance:
+                    hospital_distances.append({
+                        "name": hospital["hospital_name"],
+                        "distance": distance,
+                        "available_beds": hospital["available_beds"],
+                        "total_beds": hospital.get("total_beds", 0)
+                    })
+            except Exception as dist_error:
+                print(f"Error calculating distance for {hospital.get('hospital_name', 'Unknown')}: {str(dist_error)}")
+        
+        print(f"Found {len(hospital_distances)} hospitals within {max_distance}km")
+        
+        if not hospital_distances:
+            print(f"No hospitals found within {max_distance}km")
+            return None
+            
+        # Sort hospitals by distance (primary) and available beds (secondary)
+        sorted_hospitals = sorted(hospital_distances, key=lambda x: (x["distance"], -x["available_beds"]))
+        
+        # Return the nearest hospital
+        nearest = sorted_hospitals[0]
+        print(f"Selected nearest hospital: {nearest['name']} at {nearest['distance']:.2f}km with {nearest['available_beds']} available beds")
+        
+        return nearest
+        
     except Exception as e:
-        st.error(f"Error finding nearest hospital: {e}")
-        print(f"Error finding nearest hospital: {str(e)}")
+        error_msg = f"Error finding nearest hospital: {str(e)}"
+        st.error(error_msg)
+        print(error_msg)
         return None
 
 def book_hospital_bed(patient_name, phone, symptoms, hospital_name):
@@ -708,6 +765,158 @@ def discharge_patient(hospital_name, patient_name, patient_phone):
         st.session_state.discharge_error = error_msg
         return False
 
+# Add these debugging functions to help identify and fix issues
+def debug_hospital_data():
+    """
+    Function to check hospital data structure and integrity
+    Use this to troubleshoot when hospital search is not working
+    """
+    if db is None:
+        st.error("Database connection not available")
+        return
+    
+    try:
+        hospitals_collection = db["hospitals"]
+        all_hospitals = list(hospitals_collection.find())
+        
+        st.subheader("Hospital Data Debugging")
+        st.write(f"Found {len(all_hospitals)} hospitals in database")
+        
+        if not all_hospitals:
+            st.error("No hospitals found in database!")
+            st.write("Please check database connection and initialization")
+            return
+        
+        # Check each hospital
+        for hospital in all_hospitals:
+            st.write("---")
+            st.write(f"**Hospital Name:** {hospital.get('hospital_name', 'Missing name!')}")
+            
+            # Check location data
+            if "location" not in hospital:
+                st.error("⚠️ Location data missing!")
+            else:
+                location = hospital["location"]
+                if "latitude" not in location or "longitude" not in location:
+                    st.error("⚠️ Latitude or longitude missing!")
+                else:
+                    st.write(f"Location: Lat {location['latitude']}, Long {location['longitude']}")
+            
+            # Check bed availability
+            if "available_beds" not in hospital:
+                st.error("⚠️ Available beds data missing!")
+            else:
+                st.write(f"Available beds: {hospital['available_beds']}")
+                
+                # Warn if no beds available
+                if hospital['available_beds'] <= 0:
+                    st.warning("⚠️ No beds available in this hospital")
+            
+            # Check patients list
+            if "patients" not in hospital:
+                st.error("⚠️ Patients list missing!")
+            else:
+                patients = hospital["patients"]
+                if not isinstance(patients, list):
+                    st.error("⚠️ Patients field is not a list!")
+                else:
+                    st.write(f"Patients: {len(patients)}")
+    
+    except Exception as e:
+        st.error(f"Error debugging hospital data: {str(e)}")
+
+def repair_hospital_data():
+    """
+    Function to repair common issues with hospital data
+    Use this when hospital search is not working
+    """
+    if db is None:
+        st.error("Database connection not available")
+        return False
+    
+    try:
+        hospitals_collection = db["hospitals"]
+        all_hospitals = list(hospitals_collection.find())
+        
+        if not all_hospitals:
+            st.error("No hospitals found to repair!")
+            return False
+        
+        repairs_made = 0
+        
+        # Process each hospital
+        for hospital in all_hospitals:
+            hospital_id = hospital["_id"]
+            updates = {}
+            
+            # Fix missing location
+            if "location" not in hospital:
+                # Set default location (Bangalore)
+                updates["location"] = {"latitude": 12.9716, "longitude": 77.5946}
+            elif "latitude" not in hospital["location"] or "longitude" not in hospital["location"]:
+                # Fix incomplete location
+                updates["location"] = {"latitude": 12.9716, "longitude": 77.5946}
+            
+            # Fix bed counts
+            patient_count = len(hospital.get("patients", []))
+            total_beds = hospital.get("total_beds", 100)
+            
+            if "available_beds" not in hospital or hospital["available_beds"] < 0:
+                # Calculate available beds
+                available = max(0, total_beds - patient_count)
+                updates["available_beds"] = available
+            
+            if "occupied_beds" not in hospital or hospital["occupied_beds"] != patient_count:
+                # Sync occupied beds with patient count
+                updates["occupied_beds"] = patient_count
+            
+            # Fix total beds if needed
+            if "total_beds" not in hospital:
+                updates["total_beds"] = 100
+            
+            # Fix missing patients list
+            if "patients" not in hospital:
+                updates["patients"] = []
+            
+            # Apply updates if needed
+            if updates:
+                result = hospitals_collection.update_one(
+                    {"_id": hospital_id},
+                    {"$set": updates}
+                )
+                if result.modified_count > 0:
+                    repairs_made += 1
+        
+        if repairs_made > 0:
+            st.success(f"Repaired {repairs_made} hospital records")
+            return True
+        else:
+            st.info("No repairs needed")
+            return True
+    
+    except Exception as e:
+        st.error(f"Error repairing hospital data: {str(e)}")
+        return False
+
+# Add this to the sidebar for admin access
+def add_debug_tools_to_sidebar():
+    """Add debugging tools to the sidebar for administrators"""
+    st.sidebar.subheader("Admin Tools")
+    
+    # Only show for hospital admins
+    if st.session_state.logged_in and st.session_state.user_type == "hospital":
+        if st.sidebar.button("Debug Hospital Data"):
+            debug_hospital_data()
+        
+        if st.sidebar.button("Repair Hospital Data"):
+            success = repair_hospital_data()
+            if success:
+                st.sidebar.success("Repair completed")
+                # Force a page refresh to see changes
+                st.rerun()
+            else:
+                st.sidebar.error("Repair failed")
+
 # Chatbot Interface - Simplified version without suggested questions
 def display_chatbot_interface():
     st.header("🏥 Ask a Healthcare Provider")
@@ -886,11 +1095,14 @@ def display_booking_interface():
         st.subheader("📍 Patient Location")
         location_col1, location_col2 = st.columns(2)
         with location_col1:
-            latitude = st.number_input("Latitude", value=st.session_state.patient_latitude or 12.97, format="%.4f")
+            latitude = st.number_input("Latitude", value=st.session_state.patient_latitude or 12.97, format="%.4f", 
+                                       help="Your current latitude - you can use Google Maps to find your coordinates")
         with location_col2:
-            longitude = st.number_input("Longitude", value=st.session_state.patient_longitude or 77.59, format="%.4f")
+            longitude = st.number_input("Longitude", value=st.session_state.patient_longitude or 77.59, format="%.4f",
+                                        help="Your current longitude - you can use Google Maps to find your coordinates")
         
-        search_radius = st.slider("Maximum Search Distance (km)", min_value=5, max_value=30, value=10, step=5)
+        search_radius = st.slider("Search Distance (km)", min_value=5, max_value=50, value=10, step=5,
+                                 help="Maximum distance to search for hospitals")
         
         find_hospital = st.form_submit_button("Find Nearest Hospital")
     
@@ -913,18 +1125,26 @@ def display_booking_interface():
             st.session_state.patient_latitude = latitude
             st.session_state.patient_longitude = longitude
             
-            # Find nearest hospital
-            patient_location = (latitude, longitude)
-            
-            # Try to find hospital within increasing radius
-            nearest_hospital = None
-            for radius in [search_radius, 15, 20, 30]:
-                nearest_hospital = find_nearest_hospital(patient_location, radius)
-                if nearest_hospital:
-                    break
-            
-            # Save nearest hospital to session state
-            st.session_state.nearest_hospital = nearest_hospital
+            # Find nearest hospital with detailed progress updates
+            with st.spinner("Searching for hospitals with available beds..."):
+                patient_location = (latitude, longitude)
+                
+                st.info(f"Looking for hospitals within {search_radius}km of your location...")
+                
+                # Try to find hospital within initial radius
+                nearest_hospital = find_nearest_hospital(patient_location, search_radius)
+                
+                # If no hospital found, try with increasing radius
+                if not nearest_hospital:
+                    for radius in [20, 30, 50]:
+                        if radius > search_radius:  # Only try larger radii
+                            st.info(f"No hospitals found within {search_radius}km. Expanding search to {radius}km...")
+                            nearest_hospital = find_nearest_hospital(patient_location, radius)
+                            if nearest_hospital:
+                                break
+                
+                # Save result to session state
+                st.session_state.nearest_hospital = nearest_hospital
             
             # Force refresh to show the hospital data
             st.rerun()
@@ -934,51 +1154,61 @@ def display_booking_interface():
         nearest_hospital = st.session_state.nearest_hospital
         st.success(f"Nearest hospital found: {nearest_hospital['name']} (Distance: {nearest_hospital['distance']:.2f} km)")
         
-        # Display hospital details and booking option
+        # Display hospital details and booking option with better styling
         st.subheader("Hospital Details")
-        st.markdown(f"""
-        - **Hospital:** {nearest_hospital['name']}
-        - **Distance:** {nearest_hospital['distance']:.2f} km
-        - **Available Beds:** {nearest_hospital['available_beds']}
-        """)
+        
+        # Create metrics for hospital details
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Hospital", nearest_hospital['name'])
+        with col2:
+            st.metric("Distance", f"{nearest_hospital['distance']:.2f} km")
+        with col3:
+            st.metric("Available Beds", nearest_hospital['available_beds'])
         
         # Show hospital on map
         if db is not None:
-            hospital_info = db["hospitals"].find_one({"hospital_name": nearest_hospital['name']})
-            if hospital_info:
-                m = folium.Map(location=[st.session_state.patient_latitude, st.session_state.patient_longitude], zoom_start=12)
-                
-                # Add patient marker
-                folium.Marker(
-                    [st.session_state.patient_latitude, st.session_state.patient_longitude],
-                    popup="Your Location",
-                    icon=folium.Icon(color="blue", icon="user")
-                ).add_to(m)
-                
-                # Add hospital marker
-                hospital_lat = hospital_info["location"]["latitude"]
-                hospital_lon = hospital_info["location"]["longitude"]
-                folium.Marker(
-                    [hospital_lat, hospital_lon],
-                    popup=hospital_info["hospital_name"],
-                    icon=folium.Icon(color="red", icon="plus")
-                ).add_to(m)
-                
-                # Add line between points
-                folium.PolyLine(
-                    [(st.session_state.patient_latitude, st.session_state.patient_longitude), 
-                     (hospital_lat, hospital_lon)],
-                    color="green",
-                    weight=2,
-                    opacity=1
-                ).add_to(m)
-                
-                # Display map
-                st.subheader("📍 Location Map")
-                folium_static(m)
+            try:
+                hospital_info = db["hospitals"].find_one({"hospital_name": nearest_hospital['name']})
+                if hospital_info:
+                    m = folium.Map(location=[st.session_state.patient_latitude, st.session_state.patient_longitude], zoom_start=12)
+                    
+                    # Add patient marker
+                    folium.Marker(
+                        [st.session_state.patient_latitude, st.session_state.patient_longitude],
+                        popup="Your Location",
+                        icon=folium.Icon(color="blue", icon="user")
+                    ).add_to(m)
+                    
+                    # Add hospital marker
+                    hospital_lat = hospital_info["location"]["latitude"]
+                    hospital_lon = hospital_info["location"]["longitude"]
+                    folium.Marker(
+                        [hospital_lat, hospital_lon],
+                        popup=hospital_info["hospital_name"],
+                        icon=folium.Icon(color="red", icon="plus")
+                    ).add_to(m)
+                    
+                    # Add line between points
+                    folium.PolyLine(
+                        [(st.session_state.patient_latitude, st.session_state.patient_longitude), 
+                         (hospital_lat, hospital_lon)],
+                        color="green",
+                        weight=2,
+                        opacity=1
+                    ).add_to(m)
+                    
+                    # Display map
+                    st.subheader("📍 Location Map")
+                    folium_static(m)
+            except Exception as map_error:
+                st.error(f"Error displaying map: {str(map_error)}")
         
         # Confirm booking button with progress indicator
-        if st.button("Book Now"):
+        st.subheader("Confirm Booking")
+        st.info("Review the details above and confirm your booking")
+        
+        if st.button("Book Now", use_container_width=True):
             with st.spinner("Processing your booking..."):
                 patient_name = st.session_state.patient_info["name"]
                 phone = st.session_state.patient_info["phone"]  
@@ -1001,6 +1231,8 @@ def display_booking_interface():
                 else:
                     # Error will be shown at the top
                     st.rerun()
+    elif find_hospital:  # If we tried to find a hospital but failed
+        st.error("No hospitals with available beds found within the search distance. Please try increasing the search radius or try again later.")
 
 # Patient Interface with Tabs
 def display_patient_interface():
@@ -1191,7 +1423,17 @@ def display_hospital_interface():
         st.error(f"Error displaying hospital interface: {str(e)}")
         print(f"Hospital interface error: {str(e)}")  # Log for debugging
 
-# Main App UI with improved logic
+# Add this utility function to help with location
+def get_current_location():
+    """
+    Helper function to get current location using browser geolocation API
+    Note: This is just a stub - actual implementation would require JavaScript integration
+    """
+    # This is where you would implement browser geolocation
+    # For now, we return a default Bangalore location
+    return (12.9716, 77.5946)
+
+# Main App UI with improved logic and debug tools
 def main():
     st.title("🏥 Smart Hospital Bed Allocation System")
     
@@ -1216,6 +1458,10 @@ def main():
             if st.button("Logout"):
                 logout()
                 st.rerun()
+                
+            # Add debug tools for hospital admins
+            if st.session_state.user_type == "hospital":
+                add_debug_tools_to_sidebar()
         else:
             if st.session_state.show_registration:
                 # Show the registration interface
@@ -1284,6 +1530,19 @@ def main():
             - Process patient discharges
             - View recent bookings
             """)
+        
+        # Add debug login credentials - only for development/testing
+        st.markdown("---")
+        st.subheader("Demo Accounts")
+        st.markdown("""
+        **Patient Login:**
+        - Username: patient1
+        - Password: password123
+        
+        **Hospital Admin Login:**
+        - Username: city_hospital_admin
+        - Password: adminpass
+        """)
     
     else:
         # User is logged in - show appropriate interface
