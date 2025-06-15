@@ -14,6 +14,7 @@ import os
 import json
 import re
 
+
 # Page configuration
 st.set_page_config(
     page_title="Smart Hospital Bed Allocation System",
@@ -124,7 +125,7 @@ def get_database_connection():
     try:
         # More robust connection string with proper error handling
         client = MongoClient(
-            "mongodb+srv://srit:srit@cluster0.ew3gaei.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0",
+            "mongodb+srv://innoprojects:innoprojects@innoprojects.mdhux58.mongodb.net/?retryWrites=true&w=majority&appName=InnoProjects",
             serverSelectionTimeoutMS=10000,  # Increased timeout
             connectTimeoutMS=10000,
             socketTimeoutMS=30000  # Increased for long operations
